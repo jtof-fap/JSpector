@@ -68,7 +68,6 @@ class BurpExtender(IBurpExtender, IExtensionStateListener, IHttpListener, IScann
         :param bool message_is_request: Flags whether the method is being invoked for a request or response
         :param IHttpRequestResponse message_info: Details of the request / response to be processed
         """
-        # js_url = message_info.getUrl().toString()
         url = self._helpers.analyzeRequest(message_info).getUrl()
         js_url = url.toString()
 
@@ -322,20 +321,19 @@ class BurpExtender(IBurpExtender, IExtensionStateListener, IHttpListener, IScann
 
     @staticmethod
     def is_javascript_response(url, response_info):
-        """ Check if URL or response Content-Type could contain JavasScript source code.
+        """ Check the response Content-Type or the url extension to determine if the response may contain
+        JavasScript source code..
 
         :param str url: Request URL
         :param IResponseInfo response_info: HTTP Response (IExtensionHelpers.analyzeResponse)
-        :return: True if response Content-Type is 'application/javascript' or URL ends with '.js' else False
+        :return: True if response Content-Type include 'javascript' or URL ends with '.js' else False
         :rtype: bool
         """
-        # Content-Type 'application/javascript' detected as 'script' in burp UI
-        if response_info.getStatedMimeType().lower() == "script" \
-                or response_info.getInferredMimeType().lower() == "script" \
-                or url.lower().endswith('.js'):
-            return True
-        else:
-            return False
+        headers = response_info.getHeaders()
+        content_type = next(
+            (header.split(':', 1)[1].strip() for header in headers if header.lower().startswith('content-type:')), None)
+
+        return 'javascript' in content_type.lower() or url.lower().endswith('.js')
 
     @staticmethod
     def sort_urls_endpoints(urls):
