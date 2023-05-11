@@ -13,6 +13,7 @@ from javax.swing import JMenuItem, JOptionPane
 class BurpExtender(IBurpExtender, IExtensionStateListener, IHttpListener, IScannerCheck, IContextMenuFactory):
     EXTENSION_NAME = "JSpector"
     EXTENSION_VERSION = "2.4.8"
+    ISSUE_NAME = "{} results".format(EXTENSION_NAME)
     EXPORT_TARGETS = {"URLs", "endpoints", "results"}
     ONLY_EXPORT_ALREADY_SCANNED_URLS = False
     ONLY_IN_SCOPE_EXPORT = False
@@ -25,8 +26,10 @@ class BurpExtender(IBurpExtender, IExtensionStateListener, IHttpListener, IScann
     PATTERN_EXCLUSION = re.compile(r'http://www\.w3\.org')
     PATTERN_URL_1 = re.compile(r'(?:http|https|ftp|ftps|sftp|file|tftp|telnet|gopher|ldap|ssh)://[^\s"<>]+')
     PATTERN_URL_2 = re.compile('^(?:http|https|ftp|ftps|sftp|file|tftp|telnet|gopher|ldap|ssh)://')
+    PATTERN_PORT_IN_URL = re.compile(r'^https?://[^/]+(:\d+)/.*')
 
     def __init__(self):
+        """ BurpExtender init method. """
         self._callbacks = None
         self._helpers = None
         self._scanned_js_files = set()
@@ -71,7 +74,7 @@ class BurpExtender(IBurpExtender, IExtensionStateListener, IHttpListener, IScann
         url = self._helpers.analyzeRequest(message_info).getUrl()
         js_url = url.toString()
 
-        # Ignore tools other than PROXY, requests, out-of-scope responses, and already scanned URLs
+        # Ignore tools other than PROXY, requests, out-of-scope responses, and already scanned URLs (in memory only)
         if tool_flag != self._callbacks.TOOL_PROXY \
                 or message_is_request \
                 or (BurpExtender.ONLY_IN_SCOPE_PROXY and not self._callbacks.isInScope(url)) \
@@ -81,8 +84,9 @@ class BurpExtender(IBurpExtender, IExtensionStateListener, IHttpListener, IScann
         response = message_info.getResponse()
         if response:
             response_info = self._helpers.analyzeResponse(response)
-            # Process only javascript responses
-            if BurpExtender.is_javascript_response(js_url, response_info):
+            # Process only JavaScript responses that are not part of an issue already present in the project sitemap
+            if BurpExtender.is_javascript_response(js_url, response_info) \
+                    and not BurpExtender.is_url_already_scanned(js_url, self._callbacks):
                 # Tag URL as scanned
                 self._scanned_js_files.add(js_url)
                 # Search URLs and endpoints in response body and create issue
@@ -108,15 +112,16 @@ class BurpExtender(IBurpExtender, IExtensionStateListener, IHttpListener, IScann
         js_url = url.toString()
         response = base_request_response.getResponse()
 
-        # Ignore out-of-scope responses, and already scanned URLs
+        # Ignore out-of-scope responses, and already scanned URLs (in memory only, since the extension has been loaded)
         if (BurpExtender.ONLY_IN_SCOPE_PASSIVE_SCAN and not self._callbacks.isInScope(url)) \
                 or js_url in self._scanned_js_files:
             return issues
 
         if response:
             response_info = self._helpers.analyzeResponse(response)
-            # Process only javascript responses
-            if BurpExtender.is_javascript_response(js_url, response_info):
+            # Process only JavaScript responses that are not part of an issue already present in the project sitemap
+            if BurpExtender.is_javascript_response(js_url, response_info) \
+                    and not BurpExtender.is_url_already_scanned(js_url, self._callbacks):
                 # Tag js_url as scanned
                 self._scanned_js_files.add(js_url)
                 # Search URLs and endpoints in response body and create issue
@@ -157,7 +162,8 @@ class BurpExtender(IBurpExtender, IExtensionStateListener, IHttpListener, IScann
         :return: -1 to report the existing issue only, 0 to report both issues, and 1 to report the new issue only
         :rtype: int
         """
-        if existing_issue.getIssueDetail() == new_issue.getIssueDetail():
+        # In memory only, since the extension has been loaded
+        if existing_issue.getIssueName() == new_issue.getIssueName():
             return -1
         else:
             return 0
@@ -231,7 +237,7 @@ class BurpExtender(IBurpExtender, IExtensionStateListener, IHttpListener, IScann
             response = message.getResponse()
             if response:
                 response_info = self._helpers.analyzeResponse(response)
-                # Process only javascript responses
+                # Process only JavaScript responses
                 if BurpExtender.is_javascript_response(js_url, response_info):
                     # Search URLs and endpoints in response body and them to all_results
                     body = response[response_info.getBodyOffset():]
@@ -336,6 +342,31 @@ class BurpExtender(IBurpExtender, IExtensionStateListener, IHttpListener, IScann
         return 'javascript' in content_type.lower() or url.lower().endswith('.js')
 
     @staticmethod
+    def is_url_already_scanned(url, extender_callback, issue_name=ISSUE_NAME):
+        """ Check if an issue already exists in Site map issues for a given URL.
+
+        This method also normalize if needed the given URL to the `issue.getUrl()` format: http://sub.domain.tld/path
+        versus http://sub.domain.tld:80/path for `url.toString()`. If present, the `:PORT` pattern will be removed from
+        URLs like http://sub.domain.tld:80/path but not in URLs like http://sub.domain.tld/path?url=//domain.tld:80/path
+
+        :param str url: Request URL to check
+        :param IBurpExtenderCallbacks extender_callback: Instance of IBurpExtenderCallbacks interface
+        :param str issue_name: Issue name to check
+        :return: True if an issue with the same name and URL already exists, False otherwise
+        :rtype: bool
+        """
+        # Normalize url if needed
+        issue_url = url
+        url_port = BurpExtender.PATTERN_PORT_IN_URL.match(issue_url)
+        if url_port and url_port.group(1):
+            issue_url = issue_url.replace(url_port.group(1), "")
+
+        # Retrieve existing issues for this URL and check if any of them match the issue_name
+        issues = extender_callback.getScanIssues(issue_url)
+
+        return any(issue.getIssueName() == issue_name for issue in issues)
+
+    @staticmethod
     def sort_urls_endpoints(urls):
         """ Differentiates in an unsorted set from the extract_urls_from_js method the URLs and the endpoints
         and returns them sorted in two distinct lists.
@@ -379,7 +410,7 @@ class JSURLsIssue(IScanIssue):
         return self._url
 
     def getIssueName(self):
-        return "{} results".format(BurpExtender.EXTENSION_NAME)
+        return BurpExtender.ISSUE_NAME
 
     def getIssueType(self):
         return 0x08000000
